@@ -13,4 +13,3 @@ libpango-1.0-0
 libcairo2
 fonts-wqy-zenhei
 
-更新完 `app.py` 後，請到後台執行 **Reboot** 即可。
