@@ -1,31 +1,43 @@
 import streamlit as st
 from playwright.sync_api import sync_playwright
 import time
-import os
 import subprocess
+import zipfile
+import io
+import re
+from datetime import datetime
 
 # --- 初始化設定 ---
-st.set_page_config(page_title="網頁轉 PDF 神器", layout="centered")
-st.title("📄 網頁轉 PDF 工具")
-st.markdown("輸入網址，自動滾動加載圖片，並將網頁存成 PDF 下載。")
+st.set_page_config(page_title="網頁情資擷取助手", layout="centered")
+st.title("🛡️ 網頁情資擷取助手 (PDF)")
+st.markdown("戰略記錄專用工具：支援「單點快照」與「批量歸檔」。")
 
-# --- 關鍵：檢查並安裝瀏覽器 (針對 Streamlit Cloud 環境) ---
+# --- 核心：環境檢查 (只跑一次) ---
 def ensure_browsers_installed():
-    # 檢查是否已經安裝過 chromium，避免重複執行
-    # 注意：在 Streamlit Cloud 重啟時可能會重置，所以保留這個檢查很安全
     try:
-        # 嘗試執行一個簡單的 playwright 指令看是否報錯
         with sync_playwright() as p:
             p.chromium.launch(headless=True)
     except Exception:
-        st.warning("正在初始化瀏覽器核心，第一次執行需耗時約 30-60 秒，請稍候...")
-        subprocess.run(["playwright", "install", "chromium"])
-        subprocess.run(["playwright", "install-deps"]) # 安裝系統依賴
-        st.success("瀏覽器核心安裝完成！")
+        with st.spinner("正在初始化核心引擎 (首次執行需 30-60 秒)..."):
+            subprocess.run(["playwright", "install", "chromium"])
+            subprocess.run(["playwright", "install-deps"])
+            st.success("核心就緒！")
 
-# --- 核心功能：滾動頁面 (處理 Lazy Loading) ---
+if 'browser_checked' not in st.session_state:
+    ensure_browsers_installed()
+    st.session_state['browser_checked'] = True
+
+# --- 通用工具函式 ---
+def get_safe_filename(url, index=None):
+    clean_url = re.sub(r'^https?://', '', url)
+    safe_name = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)
+    # 如果有傳入 index，代表是批次模式，加上序號
+    if index is not None:
+        return f"{index+1:02d}_{safe_name[:50]}.pdf"
+    return f"{safe_name[:50]}.pdf"
+
 def scroll_page(page):
-    """模擬使用者滾動，確保動態圖片載入"""
+    """模擬真人滾動，觸發 Lazy Loading"""
     page.evaluate("""
         async () => {
             await new Promise((resolve) => {
@@ -35,7 +47,6 @@ def scroll_page(page):
                     var scrollHeight = document.body.scrollHeight;
                     window.scrollBy(0, distance);
                     totalHeight += distance;
-
                     if(totalHeight >= scrollHeight - window.innerHeight){
                         clearInterval(timer);
                         resolve();
@@ -44,70 +55,135 @@ def scroll_page(page):
             });
         }
     """)
-    # 滾動完後稍微等待一下，確保渲染完成
-    time.sleep(2) 
-    # 滾回頂部，有些固定 Header 遮擋的問題可以透過這樣重置
+    time.sleep(2)
     page.evaluate("window.scrollTo(0, 0)")
 
-# --- 核心功能：產生 PDF ---
-def generate_pdf(url):
+# --- 模式一：單一網址處理邏輯 ---
+def generate_single_pdf(url):
     with sync_playwright() as p:
-        # 啟動瀏覽器
-        # --no-sandbox 是為了在 Linux/Docker 環境下穩定運行
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         )
         page = context.new_page()
-
         try:
-            # 1. 前往網址
-            st.info(f"正在讀取網頁：{url}")
+            st.info(f"正在連接目標：{url}")
             page.goto(url, wait_until="networkidle", timeout=60000)
-            
-            # 2. 模擬螢幕顯示 (避免列印樣式跑版)
             page.emulate_media(media="screen")
             
-            # 3. 執行滾動加載
-            st.info("正在處理動態內容與圖片載入...")
+            st.info("正在執行深度滾動掃描...")
             scroll_page(page)
-
-            # 4. 輸出 PDF
-            st.info("正在渲染 PDF...")
+            
             pdf_bytes = page.pdf(
                 format="A4",
-                print_background=True, # 保留背景顏色/圖片
+                print_background=True,
                 margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"}
             )
-            
             return pdf_bytes
-            
         except Exception as e:
-            st.error(f"發生錯誤：{e}")
+            st.error(f"擷取失敗：{e}")
             return None
         finally:
             browser.close()
 
-# --- UI 介面邏輯 ---
-# 確保環境準備好
-if 'browser_checked' not in st.session_state:
-    ensure_browsers_installed()
-    st.session_state['browser_checked'] = True
-
-url_input = st.text_input("請輸入目標網址 (包含 https://)", placeholder="https://www.example.com")
-
-if st.button("開始轉換", type="primary"):
-    if not url_input:
-        st.warning("請輸入網址")
-    else:
-        with st.spinner('機器人正在工作中，請稍候...'):
-            pdf_data = generate_pdf(url_input)
+# --- 模式二：批次網址處理邏輯 ---
+def generate_batch_pdfs(url_list):
+    zip_buffer = io.BytesIO()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    with sync_playwright() as p:
+        # 批次模式下，Browser 實例重用，效率較高
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        context = browser.new_context(
+             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        )
+        
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            total = len(url_list)
+            success_count = 0
             
+            for i, url in enumerate(url_list):
+                url = url.strip()
+                if not url: continue
+                
+                status_text.text(f"正在處理 ({i+1}/{total}): {url}")
+                page = context.new_page()
+                
+                try:
+                    page.goto(url, wait_until="networkidle", timeout=60000)
+                    page.emulate_media(media="screen")
+                    scroll_page(page)
+                    
+                    pdf_bytes = page.pdf(
+                        format="A4",
+                        print_background=True,
+                        margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"}
+                    )
+                    
+                    filename = get_safe_filename(url, i)
+                    zip_file.writestr(filename, pdf_bytes)
+                    success_count += 1
+                    
+                except Exception as e:
+                    st.error(f"跳過錯誤連結 {url}: {e}")
+                finally:
+                    page.close()
+                    
+                progress_bar.progress((i + 1) / total)
+
+        browser.close()
+        status_text.text(f"任務完成。成功擷取 {success_count} / {total} 個頁面。")
+        
+    zip_buffer.seek(0)
+    return zip_buffer
+
+# --- UI 介面佈局 (Tabs) ---
+tab1, tab2 = st.tabs(["🔍 單一精確擷取", "📚 批量戰略歸檔"])
+
+# === Tab 1: 單一模式 ===
+with tab1:
+    st.header("單一網頁轉 PDF")
+    single_url = st.text_input("輸入網址", placeholder="https://www.example.com")
+    
+    if st.button("執行轉換", key="btn_single"):
+        if not single_url:
+            st.warning("請輸入網址")
+        else:
+            pdf_data = generate_single_pdf(single_url)
             if pdf_data:
+                file_name = get_safe_filename(single_url)
                 st.success("轉換成功！")
                 st.download_button(
                     label="下載 PDF",
                     data=pdf_data,
-                    file_name="output_page.pdf",
+                    file_name=file_name,
                     mime="application/pdf"
                 )
+
+# === Tab 2: 批次模式 ===
+with tab2:
+    st.header("批量網頁轉 PDF (ZIP 打包)")
+    batch_urls = st.text_area(
+        "輸入網址列表 (一行一個)", 
+        height=200,
+        placeholder="https://www.google.com\nhttps://www.example.com"
+    )
+    
+    if st.button("執行批次轉換", key="btn_batch"):
+        url_list = [line for line in batch_urls.split('\n') if line.strip()]
+        if not url_list:
+            st.warning("請至少輸入一個網址")
+        else:
+            if len(url_list) > 10:
+                st.info("💡 提示：網址較多，請耐心等候，系統將自動依序處理。")
+            
+            zip_result = generate_batch_pdfs(url_list)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            st.download_button(
+                label="📦 下載 ZIP 壓縮檔",
+                data=zip_result,
+                file_name=f"strategic_snapshot_{timestamp}.zip",
+                mime="application/zip"
+            )
