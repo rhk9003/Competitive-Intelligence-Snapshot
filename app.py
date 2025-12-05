@@ -8,9 +8,9 @@ import re
 from datetime import datetime
 
 # --- 初始化設定 ---
-st.set_page_config(page_title="網頁情資擷取助手", layout="centered")
-st.title("🛡️ 網頁情資擷取助手 (PDF)")
-st.markdown("戰略記錄專用工具：支援「單點快照」與「批量歸檔」。")
+st.set_page_config(page_title="網頁情資擷取助手 (Pro)", layout="centered")
+st.title("🛡️ 網頁情資擷取助手")
+st.markdown("戰略記錄專用工具：支援「單點快照」與「批量歸檔」，具備抗雜訊網址識別功能。")
 
 # --- 核心：環境檢查 (只跑一次) ---
 def ensure_browsers_installed():
@@ -29,7 +29,9 @@ if 'browser_checked' not in st.session_state:
 
 # --- 通用工具函式 ---
 def get_safe_filename(url, index=None):
+    # 移除 http/https
     clean_url = re.sub(r'^https?://', '', url)
+    # 替換不合法字元為底線
     safe_name = re.sub(r'[^a-zA-Z0-9]', '_', clean_url)
     # 如果有傳入 index，代表是批次模式，加上序號
     if index is not None:
@@ -93,7 +95,6 @@ def generate_batch_pdfs(url_list):
     status_text = st.empty()
     
     with sync_playwright() as p:
-        # 批次模式下，Browser 實例重用，效率較高
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = browser.new_context(
              user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -104,9 +105,6 @@ def generate_batch_pdfs(url_list):
             success_count = 0
             
             for i, url in enumerate(url_list):
-                url = url.strip()
-                if not url: continue
-                
                 status_text.text(f"正在處理 ({i+1}/{total}): {url}")
                 page = context.new_page()
                 
@@ -126,7 +124,8 @@ def generate_batch_pdfs(url_list):
                     success_count += 1
                     
                 except Exception as e:
-                    st.error(f"跳過錯誤連結 {url}: {e}")
+                    # 容錯處理：單一失敗不影響整體
+                    st.error(f"跳過錯誤連結 {url}: {str(e)[:100]}...") 
                 finally:
                     page.close()
                     
@@ -161,22 +160,31 @@ with tab1:
                     mime="application/pdf"
                 )
 
-# === Tab 2: 批次模式 ===
+# === Tab 2: 批次模式 (含 Regex 容錯) ===
 with tab2:
     st.header("批量網頁轉 PDF (ZIP 打包)")
     batch_urls = st.text_area(
-        "輸入網址列表 (一行一個)", 
+        "輸入網址列表 (支援混合文字貼上，系統會自動過濾出網址)", 
         height=200,
-        placeholder="https://www.google.com\nhttps://www.example.com"
+        placeholder="即使貼入含有說明的文字，例如：\n1. Google首頁 https://google.com\n2. 雅虎 https://yahoo.com\n系統也能自動識別。"
     )
     
     if st.button("執行批次轉換", key="btn_batch"):
-        url_list = [line for line in batch_urls.split('\n') if line.strip()]
+        # --- 升級後的邏輯：使用 Regex 自動抓取網址 ---
+        # 尋找所有以 http 或 https 開頭，直到遇到空白為止的字串
+        url_pattern = re.compile(r'(https?://\S+)')
+        url_list = url_pattern.findall(batch_urls)
+        
+        # 去除重複網址 (保持順序)
+        url_list = list(dict.fromkeys(url_list))
+
         if not url_list:
-            st.warning("請至少輸入一個網址")
+            st.warning("⚠️ 未偵測到有效網址，請確認內容包含 http:// 或 https://")
         else:
+            st.info(f"已識別 {len(url_list)} 個有效網址，開始作業...")
+            
             if len(url_list) > 10:
-                st.info("💡 提示：網址較多，請耐心等候，系統將自動依序處理。")
+                st.warning("💡 網址較多，請耐心等候...")
             
             zip_result = generate_batch_pdfs(url_list)
             
