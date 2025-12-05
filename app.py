@@ -10,7 +10,7 @@ from datetime import datetime
 # --- 初始化設定 ---
 st.set_page_config(page_title="網頁情資擷取助手 (Pro)", layout="centered")
 st.title("🛡️ 網頁情資擷取助手")
-st.markdown("戰略記錄專用工具：支援「單點快照」與「批量歸檔」，具備抗雜訊網址識別功能。")
+st.markdown("戰略記錄專用工具：支援「單點快照」與「批量歸檔」，已優化抗干擾能力。")
 
 # --- 核心：環境檢查 (只跑一次) ---
 def ensure_browsers_installed():
@@ -70,7 +70,9 @@ def generate_single_pdf(url):
         page = context.new_page()
         try:
             st.info(f"正在連接目標：{url}")
-            page.goto(url, wait_until="networkidle", timeout=60000)
+            
+            # [關鍵修正] 改用 domcontentloaded 以避免被廣告追蹤碼卡死 Timeout
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.emulate_media(media="screen")
             
             st.info("正在執行深度滾動掃描...")
@@ -109,7 +111,8 @@ def generate_batch_pdfs(url_list):
                 page = context.new_page()
                 
                 try:
-                    page.goto(url, wait_until="networkidle", timeout=60000)
+                    # [關鍵修正] 改用 domcontentloaded 提升對 Pixnet 等重廣告網站的相容性
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     page.emulate_media(media="screen")
                     scroll_page(page)
                     
@@ -124,7 +127,7 @@ def generate_batch_pdfs(url_list):
                     success_count += 1
                     
                 except Exception as e:
-                    # 容錯處理：單一失敗不影響整體
+                    # 容錯處理：單一失敗不影響整體，只印出錯誤訊息
                     st.error(f"跳過錯誤連結 {url}: {str(e)[:100]}...") 
                 finally:
                     page.close()
