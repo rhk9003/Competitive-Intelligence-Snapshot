@@ -8,9 +8,9 @@ import re
 from datetime import datetime
 
 # --- 初始化設定 ---
-st.set_page_config(page_title="網頁情資擷取助手 (Pro)", layout="centered")
+st.set_page_config(page_title="網頁情資擷取助手 (Ultimate)", layout="centered")
 st.title("🛡️ 網頁情資擷取助手")
-st.markdown("戰略記錄專用工具：支援「單點快照」與「批量歸檔」，已優化抗干擾能力。")
+st.markdown("戰略記錄專用工具：支援「Meta廣告展開」、「抗廣告干擾」與「智慧網址清洗」。")
 
 # --- 核心：環境檢查 (只跑一次) ---
 def ensure_browsers_installed():
@@ -38,8 +38,9 @@ def get_safe_filename(url, index=None):
         return f"{index+1:02d}_{safe_name[:50]}.pdf"
     return f"{safe_name[:50]}.pdf"
 
+# --- 核心功能 1: 滾動頁面 ---
 def scroll_page(page):
-    """模擬真人滾動，觸發 Lazy Loading"""
+    """模擬真人滾動，觸發 Lazy Loading (針對瀑布流網站)"""
     page.evaluate("""
         async () => {
             await new Promise((resolve) => {
@@ -60,6 +61,46 @@ def scroll_page(page):
     time.sleep(2)
     page.evaluate("window.scrollTo(0, 0)")
 
+# --- 核心功能 2: Meta 內容展開 (針對廣告檔案庫) ---
+def expand_meta_content(page):
+    """自動尋找並點擊「顯示摘要」等按鈕，確保 PDF 內容完整"""
+    page.evaluate("""
+        async () => {
+            const keywords = ['顯示摘要', 'See summary', '顯示更多', 'See more', 'See details'];
+            // 找出所有可能的按鈕元素
+            const elements = document.querySelectorAll('div[role="button"], span, div');
+            
+            for (let el of elements) {
+                if (keywords.some(kw => el.innerText.includes(kw))) {
+                    try {
+                        el.click();
+                    } catch (e) {
+                        console.log('Click error:', e);
+                    }
+                }
+            }
+        }
+    """)
+    time.sleep(2) # 等待展開動畫
+
+# --- 核心功能 3: 影片顯示修復 ---
+def fix_video_display(page):
+    """強制暫停影片並定格在第1秒，避免 PDF 出現黑框"""
+    page.evaluate("""
+        () => {
+            const videos = document.querySelectorAll('video');
+            videos.forEach(video => {
+                video.pause();
+                if (video.currentTime === 0) {
+                    video.currentTime = 1; // 強制定格
+                }
+                video.controls = true;
+                video.setAttribute('preload', 'auto');
+            });
+        }
+    """)
+    time.sleep(1)
+
 # --- 模式一：單一網址處理邏輯 ---
 def generate_single_pdf(url):
     with sync_playwright() as p:
@@ -71,12 +112,16 @@ def generate_single_pdf(url):
         try:
             st.info(f"正在連接目標：{url}")
             
-            # [關鍵修正] 改用 domcontentloaded 以避免被廣告追蹤碼卡死 Timeout
+            # [策略優化] 改用 domcontentloaded 避免被廣告追蹤碼卡死
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.emulate_media(media="screen")
             
-            st.info("正在執行深度滾動掃描...")
+            st.info("執行深度滾動掃描...")
             scroll_page(page)
+            
+            st.info("智慧展開內容與影片定格...")
+            expand_meta_content(page)
+            fix_video_display(page)
             
             pdf_bytes = page.pdf(
                 format="A4",
@@ -111,10 +156,13 @@ def generate_batch_pdfs(url_list):
                 page = context.new_page()
                 
                 try:
-                    # [關鍵修正] 改用 domcontentloaded 提升對 Pixnet 等重廣告網站的相容性
+                    # [策略優化] 批次模式同樣使用 domcontentloaded 以提升速度
                     page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     page.emulate_media(media="screen")
+                    
                     scroll_page(page)
+                    expand_meta_content(page)
+                    fix_video_display(page)
                     
                     pdf_bytes = page.pdf(
                         format="A4",
@@ -127,7 +175,7 @@ def generate_batch_pdfs(url_list):
                     success_count += 1
                     
                 except Exception as e:
-                    # 容錯處理：單一失敗不影響整體，只印出錯誤訊息
+                    # 容錯處理：記錄錯誤但不中斷流程
                     st.error(f"跳過錯誤連結 {url}: {str(e)[:100]}...") 
                 finally:
                     page.close()
@@ -146,7 +194,7 @@ tab1, tab2 = st.tabs(["🔍 單一精確擷取", "📚 批量戰略歸檔"])
 # === Tab 1: 單一模式 ===
 with tab1:
     st.header("單一網頁轉 PDF")
-    single_url = st.text_input("輸入網址", placeholder="https://www.example.com")
+    single_url = st.text_input("輸入網址", placeholder="https://www.facebook.com/ads/library/...")
     
     if st.button("執行轉換", key="btn_single"):
         if not single_url:
@@ -169,7 +217,7 @@ with tab2:
     batch_urls = st.text_area(
         "輸入網址列表 (支援混合文字貼上，系統會自動過濾出網址)", 
         height=200,
-        placeholder="即使貼入含有說明的文字，例如：\n1. Google首頁 https://google.com\n2. 雅虎 https://yahoo.com\n系統也能自動識別。"
+        placeholder="即使貼入含有說明的文字，例如：\n1. 競品A https://example.com\n2. 競品B https://test.com\n系統也能自動識別。"
     )
     
     if st.button("執行批次轉換", key="btn_batch"):
