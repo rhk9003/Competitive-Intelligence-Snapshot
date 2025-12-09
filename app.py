@@ -141,4 +141,80 @@ def generate_batch_pdfs(url_list):
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev]()
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 1080},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/91.0.4472.124 Safari/537.36"
+            )
+        )
+
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            total = len(url_list)
+            success_count = 0
+
+            for i, url in enumerate(url_list):
+                status_text.text(f"處理中 ({i+1}/{total}): {url}")
+                page = context.new_page()
+
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    page.emulate_media(media="screen")
+
+                    smart_scroll_and_expand(page)
+
+                    pdf_bytes = page.pdf(format="A4", print_background=True)
+
+                    filename = get_safe_filename(url, i)
+                    zip_file.writestr(filename, pdf_bytes)
+                    success_count += 1
+
+                except Exception as e:
+                    st.error(f"跳過錯誤連結 {url}: {str(e)[:100]}")
+                finally:
+                    page.close()
+
+                progress_bar.progress((i + 1) / total)
+
+        browser.close()
+        status_text.text(f"任務完成！成功：{success_count}/{total}")
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
+# --- UI 介面 ---
+tab1, tab2 = st.tabs(["🔍 單一精確擷取", "📚 批量戰略歸檔"])
+
+with tab1:
+    st.header("單一網頁轉 PDF")
+    single_url = st.text_input("輸入網址", placeholder="https://www.facebook.com/ads/library/...")
+    if st.button("執行轉換", key="btn_single"):
+        if single_url:
+            pdf_data = generate_single_pdf(single_url)
+            if pdf_data:
+                st.success("轉換成功！")
+                st.download_button("下載 PDF", pdf_data, "output.pdf", "application/pdf")
+
+with tab2:
+    st.header("批量網頁轉 PDF")
+    batch_urls = st.text_area("輸入網址列表 (自動過濾雜訊)", height=200)
+    if st.button("執行批次轉換", key="btn_batch"):
+        # 使用 Regex 過濾出網址
+        url_pattern = re.compile(r'(https?://\S+)')
+        url_list = list(dict.fromkeys(url_pattern.findall(batch_urls)))
+
+        if url_list:
+            st.info(f"開始處理 {len(url_list)} 個網址...")
+            zip_result = generate_batch_pdfs(url_list)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            st.download_button(
+                "📦 下載 ZIP",
+                zip_result,
+                f"batch_{timestamp}.zip",
+                "application/zip"
+            )
+        else:
+            st.warning("未偵測到有效網址")
