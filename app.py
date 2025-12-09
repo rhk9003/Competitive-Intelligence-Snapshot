@@ -15,12 +15,10 @@ st.markdown("戰略記錄專用工具：針對 Facebook 廣告檔案庫等「無
 # --- 核心：環境檢查 ---
 def ensure_browsers_installed():
     try:
-        # 嘗試啟動瀏覽器看是否成功
         with sync_playwright() as p:
             p.chromium.launch(headless=True)
     except Exception:
         with st.spinner("正在初始化核心引擎 (下載瀏覽器 binary)..."):
-            # [關鍵修正] 移除了 'install-deps'，因為它需要 root 權限，且 packages.txt 已經處理了系統依賴
             subprocess.run(["playwright", "install", "chromium"])
             st.success("核心就緒！")
 
@@ -36,65 +34,58 @@ def get_safe_filename(url, index=None):
         return f"{index+1:02d}_{safe_name[:50]}.pdf"
     return f"{safe_name[:50]}.pdf"
 
-# --- [關鍵升級] 深度互動滾動邏輯 ---
-def smart_scroll_and_expand(page):
+# --- 小工具：用文字點擊一批按鈕 ---
+def click_by_text(page, texts):
+    for t in texts:
+        try:
+            loc = page.locator(f"text={t}")
+            count = loc.count()
+            for i in range(count):
+                try:
+                    loc.nth(i).click()
+                except:
+                    pass
+        except:
+            # 這個文字不存在就略過
+            pass
+
+# --- 深度互動滾動邏輯（簡化穩定版） ---
+def smart_scroll_and_expand(page, max_scroll=8):
     """
-    針對 Infinite Scroll 網站的智慧滾動與點擊展開
-    這裡特別為 FB 廣告檔案庫加入：
+    針對 Infinite Scroll 網站的智慧滾動與點擊展開。
+    專門處理 FB Ad Library 裡的：
     - 廣告要點
     - 查看摘要詳情
     - 查看廣告詳情
-    等按鈕的自動點擊
+    以及一般的「查看更多 / See more」。
     """
 
-    def click_expand_targets():
-        page.evaluate("""
-            () => {
-                const keywords = [
-                    '查看更多', '顯示更多', 'See more', 'Read more', '展開', '更多',
-                    '廣告要點', '查看摘要詳情', '查看廣告詳情', '查看廣告內容', '查看詳情'
-                ];
-
-                // 盡量把可能可點擊的元素都掃一輪
-                const elements = Array.from(
-                    document.querySelectorAll('div[role="button"], span, a, button')
-                );
-
-                elements.forEach(el => {
-                    const text = (el.innerText || '').trim();
-                    if (!text) return;
-
-                    if (keywords.some(k => text.includes(k))) {
-                        try {
-                            el.click();
-                        } catch (e) {}
-                    }
-                });
-            }
-        """)
-
-    # 先在頂部點一次
-    click_expand_targets()
+    # 先在目前畫面把能展開的都展開一次
+    click_by_text(page, [
+        "廣告要點", "查看摘要詳情", "查看廣告詳情",
+        "查看更多", "顯示更多", "See more", "Read more", "展開", "更多"
+    ])
     time.sleep(1)
 
-    # 智慧無限捲動
     previous_height = page.evaluate("document.body.scrollHeight")
 
-    # 最多嘗試滾動 20 次
-    for i in range(20):
-        # 往下捲到底
+    for i in range(max_scroll):
+        # 捲到最底
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(2.5)  # 等新內容載入
+        time.sleep(2.0)
 
-        # 對新載入的內容再掃一輪「展開 / 廣告詳情 / 廣告要點」
-        click_expand_targets()
+        # 捲完再把新出現的按鈕展開一次
+        click_by_text(page, [
+            "廣告要點", "查看摘要詳情", "查看廣告詳情",
+            "查看更多", "顯示更多", "See more", "Read more", "展開", "更多"
+        ])
 
         new_height = page.evaluate("document.body.scrollHeight")
         if new_height == previous_height:
             break
         previous_height = new_height
 
-    # 再回到最上方，讓 PDF 從頁面開頭開始
+    # 回到頂端，讓 PDF 從最上面開始
     page.evaluate("window.scrollTo(0, 0)")
     time.sleep(1)
 
@@ -105,7 +96,6 @@ def generate_single_pdf(url):
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
-        # 加大 Viewport
         context = browser.new_context(
             viewport={"width": 1280, "height": 1080},
             user_agent=(
@@ -117,7 +107,6 @@ def generate_single_pdf(url):
         page = context.new_page()
         try:
             st.info(f"正在連接：{url}")
-            # 改回 domcontentloaded 避免被廣告卡死
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.emulate_media(media="screen")
 
@@ -167,7 +156,6 @@ def generate_batch_pdfs(url_list):
                     smart_scroll_and_expand(page)
 
                     pdf_bytes = page.pdf(format="A4", print_background=True)
-
                     filename = get_safe_filename(url, i)
                     zip_file.writestr(filename, pdf_bytes)
                     success_count += 1
@@ -202,7 +190,6 @@ with tab2:
     st.header("批量網頁轉 PDF")
     batch_urls = st.text_area("輸入網址列表 (自動過濾雜訊)", height=200)
     if st.button("執行批次轉換", key="btn_batch"):
-        # 使用 Regex 過濾出網址
         url_pattern = re.compile(r'(https?://\S+)')
         url_list = list(dict.fromkeys(url_pattern.findall(batch_urls)))
 
