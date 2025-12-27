@@ -218,7 +218,7 @@ with tab2:
     if st.button("執行批次轉換", key="btn_batch"):
         # 使用 Regex 過濾出網址，排除前後空白與雜訊
         url_pattern = re.compile(r'(https?://\S+)')
-        url_list = list(dict.fromkeys(url_pat0tern.findall(batch_urls)))
+        url_list = list(dict.fromkeys(url_pattern.findall(batch_urls)))
         
         if url_list:
             st.info(f"開始處理 {len(url_list)} 個網址...")
